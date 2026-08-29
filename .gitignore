@@ -1,0 +1,28 @@
+# Build outputs
+bin/
+obj/
+publish/
+tmp-build-check/
+
+# Credentials and local secrets
+*.json
+!speech-vocabulary.json
+*.p12
+*.pem
+*.key
+*.secret
+.env
+.env.*
+
+# Debug audio can contain meeting content
+DebugAudio/
+
+# Local IDE state
+.vs/
+*.user
+
+# GitHubSimpleUploader
+*.suo
+appsettings.Development.json
+node_modules/
+dist/

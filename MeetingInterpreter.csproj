@@ -1,0 +1,41 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Google.Apis.Auth" Version="1.72.0" />
+    <PackageReference Include="Google.Cloud.Speech.V1" Version="3.8.0" />
+    <PackageReference Include="Google.Cloud.TextToSpeech.V1" Version="3.7.0" />
+    <PackageReference Include="Google.Cloud.Translation.V2" Version="3.5.0" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="speech-vocabulary.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Version.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="MeetingInterpreter.Updater\**\*.cs" />
+    <None Remove="MeetingInterpreter.Updater\**\*" />
+    <Content Remove="MeetingInterpreter.Updater\**\*" />
+    <EmbeddedResource Remove="MeetingInterpreter.Updater\**\*" />
+  </ItemGroup>
+
+  <Target Name="CopyUpdaterForRun" AfterTargets="Build" Condition="'$(BuildingUpdaterForRun)' != 'true'">
+    <MSBuild Projects="MeetingInterpreter.Updater\MeetingInterpreter.Updater.csproj"
+             Targets="Build"
+             Properties="Configuration=$(Configuration);BuildingUpdaterForRun=true" />
+    <ItemGroup>
+      <UpdaterOutput Include="MeetingInterpreter.Updater\bin\$(Configuration)\$(TargetFramework)\Update.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(UpdaterOutput)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
