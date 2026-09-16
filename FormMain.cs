@@ -64,6 +64,7 @@ public partial class FormMain : Form
         _vad = new VoiceActivityDetector(_settings);
         _service = new InterpreterService(_audioService, _googlePipeline, _geminiClient, _geminiLiveSession, _googleStreamingSttService, _deepgramSttService, _engineFactory, _vad, _logger, _settings);
         BuildModernLayout();
+        ConfigureAdvancedRealtimePreviewRendering();
         ApplySavedConfigurationToUi();
         ConfigureDisplayLanguageSelector();
         ConfigureInterpreterEngineSelector();
@@ -144,6 +145,12 @@ public partial class FormMain : Form
             SpeechRecognitionModel = _settings.SpeechRecognition.Model,
             DeepgramApiKey = _settings.Deepgram.ApiKey.Trim(),
             DeepgramLanguage = _settings.Deepgram.Language,
+            InputDeviceId = (cmbInputDevice.SelectedItem as AudioDeviceInfo)?.Id ?? string.Empty,
+            InputDeviceName = (cmbInputDevice.SelectedItem as AudioDeviceInfo)?.Name ?? string.Empty,
+            Output1DeviceId = (cmbOutput1Device.SelectedItem as AudioDeviceInfo)?.Id ?? string.Empty,
+            Output1DeviceName = (cmbOutput1Device.SelectedItem as AudioDeviceInfo)?.Name ?? string.Empty,
+            Output2DeviceId = (cmbOutput2Device.SelectedItem as AudioDeviceInfo)?.Id ?? string.Empty,
+            Output2DeviceName = (cmbOutput2Device.SelectedItem as AudioDeviceInfo)?.Name ?? string.Empty,
             VadThreshold = _settings.VadThreshold,
             SilenceDurationMs = _settings.SilenceDurationMs,
             SuppressMicDuringHeadsetPlayback = _settings.SuppressMicDuringHeadsetPlayback,
@@ -261,7 +268,12 @@ public partial class FormMain : Form
 
         var engineType = GetSelectedEngineType();
 
-        if (engineType is InterpreterEngineType.GoogleCloudPipeline or InterpreterEngineType.GoogleCloudHybridPipeline or InterpreterEngineType.GoogleCloudStreamingPipeline
+        if (engineType is InterpreterEngineType.GoogleCloudPipeline
+            or InterpreterEngineType.GoogleCloudHybridPipeline
+            or InterpreterEngineType.GoogleCloudStreamingPipeline
+            or InterpreterEngineType.GoogleCloudAdvancedHybridPipeline
+            or InterpreterEngineType.GoogleCloudAdaptiveHybridPipeline
+            or InterpreterEngineType.GoogleCloudPhysicalMuteHybridPipeline
             && (string.IsNullOrWhiteSpace(txtGoogleCredentialPath.Text) || !File.Exists(txtGoogleCredentialPath.Text)))
         {
             MessageBox.Show(this, "Google Cloud chưa được cấu hình.\n\nVui lòng chọn tệp Service Account trước khi bắt đầu.", "Cần cấu hình", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -448,9 +460,16 @@ public partial class FormMain : Form
             txtGeminiApiKey.Text,
             _settings,
             _displayLanguage,
+            () => _service!.EnumerateInputDevices(),
+            () => _service!.EnumerateOutputDevices(),
+            (cmbInputDevice.SelectedItem as AudioDeviceInfo)?.Id ?? _savedSettings.InputDeviceId,
+            (cmbOutput1Device.SelectedItem as AudioDeviceInfo)?.Id ?? _savedSettings.Output1DeviceId,
+            (cmbOutput2Device.SelectedItem as AudioDeviceInfo)?.Id ?? _savedSettings.Output2DeviceId,
             path => _service!.InitializeGoogleAsync(path),
             apiKey => _service!.InitializeGeminiAsync(apiKey),
-            apiKey => _service!.InitializeDeepgramAsync(apiKey));
+            apiKey => _service!.InitializeDeepgramAsync(apiKey),
+            device => _service!.TestOutput1Async(device, CancellationToken.None),
+            device => _service!.TestOutput2Async(device, CancellationToken.None));
 
         if (settingsForm.ShowDialog(this) != DialogResult.OK)
         {
@@ -461,6 +480,16 @@ public partial class FormMain : Form
         txtGeminiApiKey.Text = settingsForm.GeminiApiKey;
         _settings.Gemini.ApiKey = settingsForm.GeminiApiKey.Trim();
         _displayLanguage = settingsForm.DisplayLanguage;
+        RefreshDeviceLists(
+            settingsForm.SelectedInputDevice?.Id,
+            settingsForm.SelectedOutput1Device?.Id,
+            settingsForm.SelectedOutput2Device?.Id,
+            settingsForm.SelectedInputDevice?.Name,
+            settingsForm.SelectedOutput1Device?.Name,
+            settingsForm.SelectedOutput2Device?.Name);
+        SelectDevice(cmbInputDevice, settingsForm.SelectedInputDevice);
+        SelectDevice(cmbOutput1Device, settingsForm.SelectedOutput1Device);
+        SelectDevice(cmbOutput2Device, settingsForm.SelectedOutput2Device);
         SyncAdvancedControlsFromSettings();
         SelectCurrentInterpreterEngineItem();
         SaveCurrentConfiguration();
@@ -539,13 +568,17 @@ public partial class FormMain : Form
 
         _service.ContentPreviewChanged += (_, args) =>
         {
-            UiThreadHelper.Run(this, () =>
+            if ((_settings.EngineType is InterpreterEngineType.GoogleCloudAdvancedHybridPipeline
+                or InterpreterEngineType.GoogleCloudAdaptiveHybridPipeline
+                or InterpreterEngineType.GoogleCloudPhysicalMuteHybridPipeline)
+                && args.IsInterim
+                && !args.IsTranslation)
             {
-                var title = args.Title.Contains("dịch", StringComparison.OrdinalIgnoreCase)
-                    ? T("Nội dung dịch", "Translated text", "번역 내용")
-                    : T("Nội dung nói", "Spoken content", "말한 내용");
-                UpdateCurrentPreview(title, args.Content);
-            });
+                QueueAdvancedRealtimePreview(args);
+                return;
+            }
+
+            UiThreadHelper.Run(this, () => ApplyContentPreview(args));
         };
     }
 
@@ -723,6 +756,9 @@ public partial class FormMain : Form
         cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudHybridPipeline, SttEngineType.GoogleSpeechToText, "3. Hybrid Speech + Async Queue"));
         cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudStreamingPipeline, SttEngineType.GoogleSpeechToText, "4. Streaming Speech + Translate + TTS"));
         cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudPipeline, SttEngineType.DeepgramNova2, "5. Deepgram + Translate + TTS"));
+        cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudAdvancedHybridPipeline, SttEngineType.GoogleSpeechToText, "6. Hybrid nâng cao"));
+        cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudAdaptiveHybridPipeline, SttEngineType.GoogleSpeechToText, "7. Hybrid thích ứng"));
+        cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudPhysicalMuteHybridPipeline, SttEngineType.GoogleSpeechToText, "8. Hybrid chốt bằng micro"));
         _settings.EngineType = currentEngine;
         _settings.SttEngineType = currentSttEngine;
         cmbInterpreterEngine.SelectedItem = cmbInterpreterEngine.Items
@@ -731,6 +767,9 @@ public partial class FormMain : Form
                 && (item.SttEngineType is null
                     || item.EngineType == InterpreterEngineType.GoogleCloudHybridPipeline
                     || item.EngineType == InterpreterEngineType.GoogleCloudStreamingPipeline
+                    || item.EngineType == InterpreterEngineType.GoogleCloudAdvancedHybridPipeline
+                    || item.EngineType == InterpreterEngineType.GoogleCloudAdaptiveHybridPipeline
+                    || item.EngineType == InterpreterEngineType.GoogleCloudPhysicalMuteHybridPipeline
                     || item.SttEngineType == _settings.SttEngineType))
             ?? cmbInterpreterEngine.Items[0];
         UpdateEngineUiState();
@@ -927,16 +966,41 @@ public partial class FormMain : Form
         Controls.Add(_lblDisplayLanguage);
     }
 
-    private void RefreshDeviceLists()
+    private void RefreshDeviceLists(
+        string? preferredInputId = null,
+        string? preferredOutput1Id = null,
+        string? preferredOutput2Id = null,
+        string? preferredInputName = null,
+        string? preferredOutput1Name = null,
+        string? preferredOutput2Name = null)
     {
-        PreserveSelection(cmbInputDevice, _service!.EnumerateInputDevices());
-        PreserveSelection(cmbOutput1Device, _service.EnumerateOutputDevices());
-        PreserveSelection(cmbOutput2Device, _service.EnumerateOutputDevices());
+        PreserveSelection(
+            cmbInputDevice,
+            _service!.EnumerateInputDevices(),
+            preferredInputId ?? _savedSettings.InputDeviceId,
+            preferredInputName ?? _savedSettings.InputDeviceName);
+        var outputDevices = _service.EnumerateOutputDevices();
+        PreserveSelection(
+            cmbOutput1Device,
+            outputDevices,
+            preferredOutput1Id ?? _savedSettings.Output1DeviceId,
+            preferredOutput1Name ?? _savedSettings.Output1DeviceName);
+        PreserveSelection(
+            cmbOutput2Device,
+            outputDevices,
+            preferredOutput2Id ?? _savedSettings.Output2DeviceId,
+            preferredOutput2Name ?? _savedSettings.Output2DeviceName);
     }
 
-    private static void PreserveSelection(ComboBox comboBox, IReadOnlyList<AudioDeviceInfo> devices)
+    private static void PreserveSelection(
+        ComboBox comboBox,
+        IReadOnlyList<AudioDeviceInfo> devices,
+        string preferredId = "",
+        string preferredName = "")
     {
-        var previousId = (comboBox.SelectedItem as AudioDeviceInfo)?.Id;
+        var previousDevice = comboBox.SelectedItem as AudioDeviceInfo;
+        var previousId = string.IsNullOrWhiteSpace(preferredId) ? previousDevice?.Id : preferredId;
+        var previousName = string.IsNullOrWhiteSpace(preferredName) ? previousDevice?.Name : preferredName;
         comboBox.Items.Clear();
 
         foreach (var device in devices)
@@ -944,10 +1008,27 @@ public partial class FormMain : Form
             comboBox.Items.Add(device);
         }
 
-        var selected = devices.FirstOrDefault(device => device.Id == previousId) ?? devices.FirstOrDefault();
+        var selected = devices.FirstOrDefault(device => device.Id == previousId)
+            ?? devices.FirstOrDefault(device => string.Equals(device.Name, previousName, StringComparison.OrdinalIgnoreCase))
+            ?? devices.FirstOrDefault();
         if (selected is not null)
         {
             comboBox.SelectedItem = comboBox.Items.Cast<AudioDeviceInfo>().First(device => device.Id == selected.Id);
+        }
+    }
+
+    private static void SelectDevice(ComboBox comboBox, AudioDeviceInfo? selectedDevice)
+    {
+        if (selectedDevice is null)
+        {
+            return;
+        }
+
+        var matchingDevice = comboBox.Items.OfType<AudioDeviceInfo>()
+            .FirstOrDefault(device => device.Id == selectedDevice.Id);
+        if (matchingDevice is not null)
+        {
+            comboBox.SelectedItem = matchingDevice;
         }
     }
 
@@ -972,12 +1053,13 @@ public partial class FormMain : Form
     private void AddTranslationRow(TranslationResult result)
     {
         var status = result.Success ? "Thành công" : ToUserStatus(result.ErrorMessage);
+        var displayOriginal = CommitTranslationToTranscript(result);
         dgvTranslations.Rows.Insert(
             0,
             GetEngineDisplayName(result.Engine),
             result.Timestamp.ToString("HH:mm:ss"),
             GetLanguageDisplayName(result.SourceLanguage),
-            result.OriginalText,
+            displayOriginal,
             GetLanguageDisplayName(result.TargetLanguage),
             result.TranslatedText,
             Math.Round(result.RecognitionMilliseconds),
@@ -985,10 +1067,6 @@ public partial class FormMain : Form
             Math.Round(result.SynthesisMilliseconds),
             FormatSeconds(result.TotalMilliseconds),
             status);
-        _lblCurrentSourceTitle.Text = GetLanguageDisplayName(result.SourceLanguage).ToUpperInvariant();
-        _lblCurrentTargetTitle.Text = GetLanguageDisplayName(result.TargetLanguage).ToUpperInvariant();
-        _rtbCurrentSource.Text = result.OriginalText;
-        _rtbCurrentTarget.Text = result.TranslatedText;
         _lblCurrentRoute.Text = result.TargetLanguage == SupportedLanguage.Korean
             ? "Đang phát đến tai nghe quản lý"
             : "Đang phát ra loa phòng họp";
@@ -1002,13 +1080,13 @@ public partial class FormMain : Form
             return;
         }
 
-        var value = dgvTranslations.Rows[e.RowIndex].Cells[e.ColumnIndex].Value?.ToString();
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return;
-        }
-
-        ShowCurrentCellValue(dgvTranslations.Columns[e.ColumnIndex].HeaderText, value);
+        var row = dgvTranslations.Rows[e.RowIndex];
+        ShowTranslationHistoryRow(
+            row.Cells["Source"].Value?.ToString() ?? T("Ngôn ngữ gốc", "Source", "원본"),
+            row.Cells["OriginalText"].Value?.ToString() ?? string.Empty,
+            row.Cells["Target"].Value?.ToString() ?? T("Ngôn ngữ đích", "Target", "대상"),
+            row.Cells["TranslatedText"].Value?.ToString() ?? string.Empty,
+            row.Cells["TotalMs"].Value?.ToString() ?? string.Empty);
     }
 
     private void ExportTranslationHistoryToExcel(string filePath)
@@ -1172,7 +1250,12 @@ public partial class FormMain : Form
             return true;
         }
 
-        if (engineType is InterpreterEngineType.GoogleCloudPipeline or InterpreterEngineType.GoogleCloudHybridPipeline or InterpreterEngineType.GoogleCloudStreamingPipeline)
+        if (engineType is InterpreterEngineType.GoogleCloudPipeline
+            or InterpreterEngineType.GoogleCloudHybridPipeline
+            or InterpreterEngineType.GoogleCloudStreamingPipeline
+            or InterpreterEngineType.GoogleCloudAdvancedHybridPipeline
+            or InterpreterEngineType.GoogleCloudAdaptiveHybridPipeline
+            or InterpreterEngineType.GoogleCloudPhysicalMuteHybridPipeline)
         {
             if (_settings.SttEngineType == SttEngineType.DeepgramNova2
                 && engineType == InterpreterEngineType.GoogleCloudPipeline
@@ -1227,6 +1310,11 @@ public partial class FormMain : Form
 
     private void ToggleSessionButtons(bool isRunning)
     {
+        if (!isRunning)
+        {
+            ClearAdvancedRealtimePreviewQueue();
+        }
+
         btnStart.Enabled = !isRunning;
         btnStop.Enabled = isRunning;
         btnStart.Visible = !isRunning;
@@ -1286,7 +1374,11 @@ public partial class FormMain : Form
         {
             _settings.SttEngineType = GetSelectedSttEngineType();
         }
-        else if (engineType is InterpreterEngineType.GoogleCloudHybridPipeline or InterpreterEngineType.GoogleCloudStreamingPipeline)
+        else if (engineType is InterpreterEngineType.GoogleCloudHybridPipeline
+            or InterpreterEngineType.GoogleCloudStreamingPipeline
+            or InterpreterEngineType.GoogleCloudAdvancedHybridPipeline
+            or InterpreterEngineType.GoogleCloudAdaptiveHybridPipeline
+            or InterpreterEngineType.GoogleCloudPhysicalMuteHybridPipeline)
         {
             _settings.SttEngineType = SttEngineType.GoogleSpeechToText;
         }
@@ -1294,6 +1386,12 @@ public partial class FormMain : Form
         var useGemini = engineType == InterpreterEngineType.Gemini25Pro;
         lblEngineDescription.Text = useGemini
             ? T("Gemini Live stream audio hai chiều, không qua Google STT/TTS.", "Gemini Live streams two-way audio without Google STT/TTS.", "Gemini Live는 Google STT/TTS 없이 양방향 오디오를 스트리밍합니다.")
+            : engineType == InterpreterEngineType.GoogleCloudPhysicalMuteHybridPipeline
+                ? T("Hiện transcript liên tục; chỉ chốt câu và dịch khi phát hiện micro vật lý chuyển sang dữ liệu số 0.", "Shows a continuous transcript and only commits translation when the physical microphone changes to digital silence.", "실시간 자막을 표시하고 물리적 마이크가 디지털 무음으로 전환될 때만 문장을 확정하여 번역합니다.")
+            : engineType == InterpreterEngineType.GoogleCloudAdaptiveHybridPipeline
+                ? T("Một Streaming STT song ngữ, gom câu nhanh và chỉ kiểm tra batch khi kết quả không chắc chắn.", "One bilingual streaming STT, fast sentence aggregation, and selective batch verification for uncertain results.", "이중 언어 스트리밍 STT 하나로 빠르게 문장을 결합하고 불확실한 결과만 배치로 재확인합니다.")
+            : engineType == InterpreterEngineType.GoogleCloudAdvancedHybridPipeline
+                ? T("Hiện chữ trực tiếp khi đang nói, sau đó gom các đoạn ngắt quãng thành câu hoàn chỉnh rồi mới dịch.", "Shows live speech text, then combines interrupted fragments into a complete sentence before translating.", "말하는 동안 텍스트를 실시간으로 표시한 뒤, 끊어진 내용을 완전한 문장으로 합쳐 번역합니다.")
             : engineType == InterpreterEngineType.GoogleCloudHybridPipeline
                 ? T("Nghe liên tục và xử lý các câu bất đồng bộ. Không cần chờ bản dịch câu trước hoàn tất mới nói tiếp.", "Listens continuously and processes utterances asynchronously. You can keep speaking while previous items are translated.", "계속 듣고 문장을 비동기로 처리합니다. 이전 번역이 끝나기 전에도 계속 말할 수 있습니다.")
             : engineType == InterpreterEngineType.GoogleCloudStreamingPipeline
@@ -1376,6 +1474,9 @@ public partial class FormMain : Form
             InterpreterEngineType.GoogleCloudPipeline => "2. Speech + Translate + TTS",
             InterpreterEngineType.GoogleCloudHybridPipeline => "3. Hybrid Speech + Async Queue",
             InterpreterEngineType.GoogleCloudStreamingPipeline => "4. Streaming Speech + Translate + TTS",
+            InterpreterEngineType.GoogleCloudAdvancedHybridPipeline => "6. Hybrid nâng cao",
+            InterpreterEngineType.GoogleCloudAdaptiveHybridPipeline => "7. Hybrid thích ứng",
+            InterpreterEngineType.GoogleCloudPhysicalMuteHybridPipeline => "8. Hybrid chốt bằng micro",
             _ => T("Không xác định", "Unknown", "알 수 없음")
         };
 

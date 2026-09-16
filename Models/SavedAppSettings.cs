@@ -18,6 +18,18 @@ public sealed class SavedAppSettings
 
     public string DeepgramLanguage { get; set; } = "multi";
 
+    public string InputDeviceId { get; set; } = string.Empty;
+
+    public string InputDeviceName { get; set; } = string.Empty;
+
+    public string Output1DeviceId { get; set; } = string.Empty;
+
+    public string Output1DeviceName { get; set; } = string.Empty;
+
+    public string Output2DeviceId { get; set; } = string.Empty;
+
+    public string Output2DeviceName { get; set; } = string.Empty;
+
     public double VadThreshold { get; set; } = 0.025;
 
     public int SilenceDurationMs { get; set; } = 900;

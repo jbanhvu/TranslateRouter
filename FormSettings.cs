@@ -9,6 +9,13 @@ public sealed class FormSettings : Form
     private readonly Func<string, Task> _testGoogleAsync;
     private readonly Func<string, Task> _testGeminiAsync;
     private readonly Func<string, Task> _testDeepgramAsync;
+    private readonly Func<AudioDeviceInfo, Task> _testOutput1Async;
+    private readonly Func<AudioDeviceInfo, Task> _testOutput2Async;
+    private readonly Func<IReadOnlyList<AudioDeviceInfo>> _enumerateInputDevices;
+    private readonly Func<IReadOnlyList<AudioDeviceInfo>> _enumerateOutputDevices;
+    private readonly string _initialInputDeviceId;
+    private readonly string _initialOutput1DeviceId;
+    private readonly string _initialOutput2DeviceId;
     private readonly TextBox _txtGoogleCredentialPath = new();
     private readonly TextBox _txtGeminiApiKey = new();
     private readonly TextBox _txtDeepgramApiKey = new();
@@ -17,8 +24,12 @@ public sealed class FormSettings : Form
     private readonly Label _lblDeepgramStatus = new();
     private readonly Button _btnSave = new();
     private readonly ComboBox _cmbDisplayLanguage = new();
-    private readonly ComboBox _cmbSttEngine = new();
+    private readonly ComboBox _cmbInterpreterEngine = new();
     private readonly ComboBox _cmbSpeechModel = new();
+    private readonly ComboBox _cmbInputDevice = new();
+    private readonly ComboBox _cmbOutput1Device = new();
+    private readonly ComboBox _cmbOutput2Device = new();
+    private readonly Label _lblAudioRefreshStatus = new();
     private readonly TrackBar _trkVadThreshold = new();
     private readonly Label _lblVadValue = new();
     private readonly NumericUpDown _nudSilenceDuration = new();
@@ -31,14 +42,28 @@ public sealed class FormSettings : Form
         string geminiApiKey,
         InterpreterSettings settings,
         DisplayLanguage displayLanguage,
+        Func<IReadOnlyList<AudioDeviceInfo>> enumerateInputDevices,
+        Func<IReadOnlyList<AudioDeviceInfo>> enumerateOutputDevices,
+        string selectedInputDeviceId,
+        string selectedOutput1DeviceId,
+        string selectedOutput2DeviceId,
         Func<string, Task> testGoogleAsync,
         Func<string, Task> testGeminiAsync,
-        Func<string, Task> testDeepgramAsync)
+        Func<string, Task> testDeepgramAsync,
+        Func<AudioDeviceInfo, Task> testOutput1Async,
+        Func<AudioDeviceInfo, Task> testOutput2Async)
     {
         _settings = settings;
         _testGoogleAsync = testGoogleAsync;
         _testGeminiAsync = testGeminiAsync;
         _testDeepgramAsync = testDeepgramAsync;
+        _testOutput1Async = testOutput1Async;
+        _testOutput2Async = testOutput2Async;
+        _enumerateInputDevices = enumerateInputDevices;
+        _enumerateOutputDevices = enumerateOutputDevices;
+        _initialInputDeviceId = selectedInputDeviceId;
+        _initialOutput1DeviceId = selectedOutput1DeviceId;
+        _initialOutput2DeviceId = selectedOutput2DeviceId;
         GoogleCredentialPath = googleCredentialPath;
         GeminiApiKey = geminiApiKey;
         DisplayLanguage = displayLanguage;
@@ -61,6 +86,12 @@ public sealed class FormSettings : Form
     public string GeminiApiKey { get; private set; }
 
     public DisplayLanguage DisplayLanguage { get; private set; }
+
+    public AudioDeviceInfo? SelectedInputDevice { get; private set; }
+
+    public AudioDeviceInfo? SelectedOutput1Device { get; private set; }
+
+    public AudioDeviceInfo? SelectedOutput2Device { get; private set; }
 
     private void BuildUi()
     {
@@ -120,13 +151,19 @@ public sealed class FormSettings : Form
         _cmbDisplayLanguage.Items.Add(new DisplayLanguageSelectionItem(DisplayLanguage.Korean, "한국어"));
         page.Controls.Add(_cmbDisplayLanguage);
 
-        AddLabel(page, T("Engine STT đầu vào", "Input STT engine", "입력 STT 엔진"), 24, 78);
-        _cmbSttEngine.Location = new Point(210, 74);
-        _cmbSttEngine.Size = new Size(220, 28);
-        UiTheme.StyleCombo(_cmbSttEngine);
-        _cmbSttEngine.Items.Add(new SttEngineSelectionItem(SttEngineType.GoogleSpeechToText, "Google Speech-to-Text"));
-        _cmbSttEngine.Items.Add(new SttEngineSelectionItem(SttEngineType.DeepgramNova2, "Deepgram (Nova-2)"));
-        page.Controls.Add(_cmbSttEngine);
+        AddLabel(page, T("Mô hình phiên dịch", "Interpreter engine", "통역 엔진"), 24, 78);
+        _cmbInterpreterEngine.Location = new Point(210, 74);
+        _cmbInterpreterEngine.Size = new Size(360, 28);
+        UiTheme.StyleCombo(_cmbInterpreterEngine);
+        _cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.Gemini25Pro, null, "1. Gemini Live"));
+        _cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudPipeline, SttEngineType.GoogleSpeechToText, "2. Speech + Translate + TTS"));
+        _cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudHybridPipeline, SttEngineType.GoogleSpeechToText, "3. Hybrid Speech + Async Queue"));
+        _cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudStreamingPipeline, SttEngineType.GoogleSpeechToText, "4. Streaming Speech + Translate + TTS"));
+        _cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudPipeline, SttEngineType.DeepgramNova2, "5. Deepgram + Translate + TTS"));
+        _cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudAdvancedHybridPipeline, SttEngineType.GoogleSpeechToText, "6. Hybrid nâng cao"));
+        _cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudAdaptiveHybridPipeline, SttEngineType.GoogleSpeechToText, "7. Hybrid thích ứng"));
+        _cmbInterpreterEngine.Items.Add(new InterpreterEngineSelectionItem(InterpreterEngineType.GoogleCloudPhysicalMuteHybridPipeline, SttEngineType.GoogleSpeechToText, "8. Hybrid chốt bằng micro"));
+        page.Controls.Add(_cmbInterpreterEngine);
 
         AddLabel(page, T("Model STT Google", "Google STT model", "Google STT 모델"), 24, 128);
         _cmbSpeechModel.Location = new Point(210, 124);
@@ -232,11 +269,42 @@ public sealed class FormSettings : Form
     private TabPage BuildAudioTab()
     {
         var page = CreateTab(T("Âm thanh", "Audio", "오디오"));
+
+        AddLabel(page, T("Microphone", "Microphone", "마이크"), 24, 28);
+        ConfigureDeviceCombo(_cmbInputDevice, 190, 24);
+        page.Controls.Add(_cmbInputDevice);
+
+        AddLabel(page, T("Loa phòng họp", "Room speaker", "회의실 스피커"), 24, 82);
+        ConfigureDeviceCombo(_cmbOutput1Device, 190, 78);
+        page.Controls.Add(_cmbOutput1Device);
+        var btnTestOutput1 = CreateAudioTestButton(570, 77, () => TestAudioAsync(_cmbOutput1Device, _testOutput1Async));
+        page.Controls.Add(btnTestOutput1);
+
+        AddLabel(page, T("Tai nghe quản lý", "Manager headset", "관리자 헤드셋"), 24, 136);
+        ConfigureDeviceCombo(_cmbOutput2Device, 190, 132);
+        page.Controls.Add(_cmbOutput2Device);
+        var btnTestOutput2 = CreateAudioTestButton(570, 131, () => TestAudioAsync(_cmbOutput2Device, _testOutput2Async));
+        page.Controls.Add(btnTestOutput2);
+
+        var btnRefreshDevices = new Button
+        {
+            Text = T("Làm mới thiết bị", "Refresh devices", "장치 새로 고침"),
+            Location = new Point(24, 186),
+            Size = new Size(154, 32)
+        };
+        UiTheme.StyleSecondaryButton(btnRefreshDevices);
+        btnRefreshDevices.Click += (_, _) => RefreshAudioDeviceLists();
+        page.Controls.Add(btnRefreshDevices);
+
+        _lblAudioRefreshStatus.Location = new Point(190, 191);
+        _lblAudioRefreshStatus.Size = new Size(470, 24);
+        _lblAudioRefreshStatus.ForeColor = UiTheme.TextSecondary;
+        page.Controls.Add(_lblAudioRefreshStatus);
+
         _chkSuppressHeadset.Text = T("Tắt xử lý mic khi đang phát ra tai nghe quản lý", "Suppress mic while manager headset is playing", "관리자 헤드셋 재생 중 마이크 처리 중지");
-        _chkSuppressHeadset.Location = new Point(24, 30);
+        _chkSuppressHeadset.Location = new Point(24, 238);
         _chkSuppressHeadset.AutoSize = true;
         page.Controls.Add(_chkSuppressHeadset);
-        AddValue(page, T("Thiết bị microphone, loa phòng họp và tai nghe được chọn ở màn hình chính.", "Microphone, room speaker, and headset are selected on the main screen.", "마이크, 회의실 스피커 및 헤드셋은 메인 화면에서 선택합니다."), 24, 75, 600);
         return page;
     }
 
@@ -298,14 +366,18 @@ public sealed class FormSettings : Form
             }
         }
 
-        foreach (var item in _cmbSttEngine.Items.OfType<SttEngineSelectionItem>())
+        foreach (var item in _cmbInterpreterEngine.Items.OfType<InterpreterEngineSelectionItem>())
         {
-            if (item.EngineType == _settings.SttEngineType)
+            if (item.EngineType == _settings.EngineType
+                && (item.SttEngineType is null || item.SttEngineType == _settings.SttEngineType))
             {
-                _cmbSttEngine.SelectedItem = item;
+                _cmbInterpreterEngine.SelectedItem = item;
                 break;
             }
         }
+        _cmbInterpreterEngine.SelectedItem ??= _cmbInterpreterEngine.Items[0];
+
+        RefreshAudioDeviceLists(_initialInputDeviceId, _initialOutput1DeviceId, _initialOutput2DeviceId);
 
         _lblGeminiStatus.Text = T("Chưa cấu hình", "Not configured", "설정 안 됨");
         _lblGoogleStatus.Text = T("Chưa cấu hình", "Not configured", "설정 안 됨");
@@ -405,9 +477,13 @@ public sealed class FormSettings : Form
         _settings.Gemini.ApiKey = GeminiApiKey.Trim();
         _settings.Deepgram.ApiKey = _txtDeepgramApiKey.Text.Trim();
         _settings.Deepgram.Language = "multi";
-        if (_cmbSttEngine.SelectedItem is SttEngineSelectionItem sttItem)
+        if (_cmbInterpreterEngine.SelectedItem is InterpreterEngineSelectionItem engineItem)
         {
-            _settings.SttEngineType = sttItem.EngineType;
+            _settings.EngineType = engineItem.EngineType;
+            if (engineItem.SttEngineType.HasValue)
+            {
+                _settings.SttEngineType = engineItem.SttEngineType.Value;
+            }
         }
 
         _settings.SpeechRecognition.Model = _cmbSpeechModel.SelectedItem?.ToString() ?? _settings.SpeechRecognition.Model;
@@ -421,7 +497,99 @@ public sealed class FormSettings : Form
             DisplayLanguage = languageItem.Language;
         }
 
+        SelectedInputDevice = _cmbInputDevice.SelectedItem as AudioDeviceInfo;
+        SelectedOutput1Device = _cmbOutput1Device.SelectedItem as AudioDeviceInfo;
+        SelectedOutput2Device = _cmbOutput2Device.SelectedItem as AudioDeviceInfo;
+
         DialogResult = DialogResult.OK;
+    }
+
+    private static void ConfigureDeviceCombo(ComboBox comboBox, int x, int y)
+    {
+        comboBox.Location = new Point(x, y);
+        comboBox.Size = new Size(365, 28);
+        UiTheme.StyleCombo(comboBox);
+    }
+
+    private void RefreshAudioDeviceLists(
+        string? preferredInputId = null,
+        string? preferredOutput1Id = null,
+        string? preferredOutput2Id = null)
+    {
+        preferredInputId ??= (_cmbInputDevice.SelectedItem as AudioDeviceInfo)?.Id;
+        preferredOutput1Id ??= (_cmbOutput1Device.SelectedItem as AudioDeviceInfo)?.Id;
+        preferredOutput2Id ??= (_cmbOutput2Device.SelectedItem as AudioDeviceInfo)?.Id;
+
+        try
+        {
+            PopulateDeviceCombo(_cmbInputDevice, _enumerateInputDevices(), preferredInputId);
+            var outputDevices = _enumerateOutputDevices();
+            PopulateDeviceCombo(_cmbOutput1Device, outputDevices, preferredOutput1Id);
+            PopulateDeviceCombo(_cmbOutput2Device, outputDevices, preferredOutput2Id);
+            _lblAudioRefreshStatus.Text = T(
+                $"Đã tìm thấy {_cmbInputDevice.Items.Count} microphone và {outputDevices.Count} thiết bị phát.",
+                $"Found {_cmbInputDevice.Items.Count} microphone(s) and {outputDevices.Count} output device(s).",
+                $"마이크 {_cmbInputDevice.Items.Count}개와 출력 장치 {outputDevices.Count}개를 찾았습니다.");
+            _lblAudioRefreshStatus.ForeColor = UiTheme.Success;
+        }
+        catch (Exception ex)
+        {
+            _lblAudioRefreshStatus.Text = T("Không thể làm mới thiết bị.", "Unable to refresh devices.", "장치를 새로 고칠 수 없습니다.");
+            _lblAudioRefreshStatus.ForeColor = UiTheme.Error;
+            MessageBox.Show(this, ex.Message, _lblAudioRefreshStatus.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private static void PopulateDeviceCombo(
+        ComboBox comboBox,
+        IReadOnlyList<AudioDeviceInfo> devices,
+        string? preferredId)
+    {
+        var previousName = (comboBox.SelectedItem as AudioDeviceInfo)?.Name;
+        comboBox.Items.Clear();
+        foreach (var device in devices)
+        {
+            comboBox.Items.Add(device);
+        }
+
+        var selected = devices.FirstOrDefault(device => device.Id == preferredId)
+            ?? devices.FirstOrDefault(device => string.Equals(device.Name, previousName, StringComparison.OrdinalIgnoreCase))
+            ?? devices.FirstOrDefault();
+        if (selected is not null)
+        {
+            comboBox.SelectedItem = selected;
+        }
+    }
+
+    private Button CreateAudioTestButton(int x, int y, Func<Task> test)
+    {
+        var button = new Button
+        {
+            Text = T("Kiểm tra", "Test", "테스트"),
+            Location = new Point(x, y),
+            Size = new Size(104, 30)
+        };
+        UiTheme.StyleSecondaryButton(button);
+        button.Click += async (_, _) => await test();
+        return button;
+    }
+
+    private async Task TestAudioAsync(ComboBox comboBox, Func<AudioDeviceInfo, Task> test)
+    {
+        if (comboBox.SelectedItem is not AudioDeviceInfo device)
+        {
+            MessageBox.Show(this, T("Vui lòng chọn thiết bị âm thanh.", "Select an audio device.", "오디오 장치를 선택하세요."));
+            return;
+        }
+
+        try
+        {
+            await test(device);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, T("Không thể phát thử", "Test failed", "테스트 실패"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     private void UpdateVadValue()
@@ -465,19 +633,4 @@ public sealed class FormSettings : Form
             Size = new Size(width, 24)
         });
     }
-}
-
-public sealed class SttEngineSelectionItem
-{
-    public SttEngineSelectionItem(SttEngineType engineType, string displayName)
-    {
-        EngineType = engineType;
-        DisplayName = displayName;
-    }
-
-    public SttEngineType EngineType { get; }
-
-    private string DisplayName { get; }
-
-    public override string ToString() => DisplayName;
 }

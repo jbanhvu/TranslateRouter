@@ -1,10 +1,13 @@
+using System.Text;
 using MeetingInterpreter.Controls;
 using MeetingInterpreter.Models;
+using MeetingInterpreter.Services;
 
 namespace MeetingInterpreter;
 
 public partial class FormMain
 {
+    private const int MaximumTranscriptCharacters = 24000;
     private Panel _mainContent = null!;
     private TableLayoutPanel _mainLayout = null!;
     private Label _lblHeaderTitle = null!;
@@ -18,27 +21,32 @@ public partial class FormMain
     private Label _lblCurrentTargetTitle = null!;
     private Label _lblCurrentRoute = null!;
     private Label _lblCurrentElapsed = null!;
-    private RichTextBox _rtbCurrentSource = null!;
-    private RichTextBox _rtbCurrentTarget = null!;
+    private TranscriptView _rtbCurrentSource = null!;
+    private TranscriptView _rtbCurrentTarget = null!;
     private ToolTip _toolTip = null!;
+    private readonly StringBuilder _sourceTranscriptHistory = new();
+    private readonly StringBuilder _targetTranscriptHistory = new();
+    private string _liveSourcePreview = string.Empty;
+    private string _liveTargetPreview = string.Empty;
+    private SupportedLanguage _liveSourceLanguage = SupportedLanguage.Unknown;
+    private string _lastCommittedSourceText = string.Empty;
+    private DateTime _lastCommittedSourceAtUtc;
+    private SupportedLanguage _lastCommittedSourceLanguage = SupportedLanguage.Unknown;
+    private readonly object _advancedRealtimePreviewSyncRoot = new();
+    private InterpreterContentPreviewEventArgs? _latestAdvancedRealtimePreview;
+    private System.Windows.Forms.Timer? _advancedRealtimePreviewTimer;
 
     private void BuildModernLayout()
     {
         SuspendLayout();
-
         Controls.Clear();
         BackColor = UiTheme.Background;
         Font = UiTheme.BodyFont;
         Text = "Phiên dịch cuộc họp Việt - Hàn";
-        MinimumSize = new Size(1080, 760);
+        MinimumSize = new Size(1080, 720);
         AutoScaleMode = AutoScaleMode.Font;
-
         _toolTip = new ToolTip();
-
-        _mainContent = new Panel
-        {
-            BackColor = UiTheme.Background
-        };
+        _mainContent = new Panel { BackColor = UiTheme.Background };
         Controls.Add(_mainContent);
 
         _mainLayout = new TableLayoutPanel
@@ -48,19 +56,18 @@ public partial class FormMain
             RowCount = 4,
             BackColor = UiTheme.Background
         };
-        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
-        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 300));
-        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 216));
-        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
+        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
+        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 64));
+        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 36));
         _mainContent.Controls.Add(_mainLayout);
 
         BuildHeader();
-        BuildDashboardCards();
-        BuildCurrentTranslationCard();
-        BuildHistoryCard();
+        BuildSessionBar();
+        BuildCurrentTranslationSurface();
+        BuildHistorySurface();
         HideAdvancedMainControls();
         ApplyCommonControlStyle();
-
         ResumeLayout(false);
     }
 
@@ -70,7 +77,7 @@ public partial class FormMain
         {
             Dock = DockStyle.Fill,
             BackColor = UiTheme.Background,
-            Padding = new Padding(0, 4, 0, 10)
+            Padding = new Padding(2, 2, 0, 8)
         };
         _mainLayout.Controls.Add(header, 0, 0);
 
@@ -80,272 +87,221 @@ public partial class FormMain
             Text = "Phiên dịch cuộc họp Việt - Hàn",
             Font = UiTheme.AppTitleFont,
             ForeColor = UiTheme.TextPrimary,
-            Location = new Point(2, 3)
+            Location = new Point(2, 2)
         };
         header.Controls.Add(_lblHeaderTitle);
 
         _lblHeaderSubtitle = new Label
         {
             AutoSize = true,
-            Text = "Phiên dịch 2 chiều thời gian thực",
+            Text = "Phiên dịch hai chiều theo thời gian thực",
             Font = UiTheme.SubtitleFont,
             ForeColor = UiTheme.TextSecondary,
-            Location = new Point(4, 42)
+            Location = new Point(4, 40)
         };
         header.Controls.Add(_lblHeaderSubtitle);
 
         btnSettings = new Button
         {
             Text = "Cài đặt",
-            Size = new Size(108, 34)
+            Size = new Size(108, 36),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
         };
         btnSettings.Click += btnSettings_Click;
         UiTheme.StyleSecondaryButton(btnSettings);
         header.Controls.Add(btnSettings);
-        _toolTip.SetToolTip(btnSettings, "Mở cài đặt kết nối, nhận dạng và âm thanh nâng cao");
-
-        _lblHeaderStatus = new Label
-        {
-            AutoSize = true,
-            Text = "● Sẵn sàng",
-            Font = UiTheme.StrongBodyFont,
-            ForeColor = UiTheme.Success,
-            TextAlign = ContentAlignment.MiddleRight
-        };
-        header.Controls.Add(_lblHeaderStatus);
-
-        header.Resize += (_, _) =>
-        {
-            btnSettings.Location = new Point(header.Width - btnSettings.Width, 18);
-            _lblHeaderStatus.Location = new Point(
-                Math.Max(0, btnSettings.Left - _lblHeaderStatus.Width - 18),
-                25);
-        };
+        _toolTip.SetToolTip(btnSettings, "Mở cài đặt mô hình, kết nối và thiết bị âm thanh");
+        header.Resize += (_, _) => btnSettings.Location = new Point(Math.Max(0, header.ClientSize.Width - btnSettings.Width), 14);
     }
 
-    private void BuildDashboardCards()
+    private void BuildSessionBar()
     {
-        var dashboard = new TableLayoutPanel
+        var bar = new Panel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 3,
-            RowCount = 1,
-            BackColor = UiTheme.Background,
-            Padding = new Padding(0, 0, 0, 16)
+            BackColor = UiTheme.CardBackground,
+            Padding = new Padding(20, 14, 20, 14),
+            Margin = new Padding(0, 0, 0, 12)
         };
-        dashboard.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-        dashboard.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 47));
-        dashboard.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 28));
-        _mainLayout.Controls.Add(dashboard, 0, 1);
-
-        dashboard.Controls.Add(BuildModelCard(), 0, 0);
-        dashboard.Controls.Add(BuildAudioCard(), 1, 0);
-        dashboard.Controls.Add(BuildStatusCard(), 2, 0);
-    }
-
-    private Control BuildModelCard()
-    {
-        var card = CreateCard();
-        lblEngineTitle = CreateCardTitle("MÔ HÌNH PHIÊN DỊCH");
-        cmbInterpreterEngine = new ComboBox { Width = 245 };
-        cmbInterpreterEngine.SelectedIndexChanged += cmbInterpreterEngine_SelectedIndexChanged;
-        lblEngineDescription = new Label
+        bar.Paint += (_, e) =>
         {
-            Location = new Point(18, 94),
-            Size = new Size(260, 72),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-            ForeColor = UiTheme.TextSecondary,
-            Font = UiTheme.BodyFont,
-            Text = "Gemini trực tiếp nghe, nhận dạng và dịch nội dung."
+            using var pen = new Pen(UiTheme.Border);
+            e.Graphics.DrawRectangle(pen, 0, 0, Math.Max(0, bar.ClientSize.Width - 1), Math.Max(0, bar.ClientSize.Height - 1));
         };
-
-        card.Controls.Add(lblEngineTitle);
-        card.Controls.Add(cmbInterpreterEngine);
-        card.Controls.Add(lblEngineDescription);
-        lblEngineTitle.Location = new Point(18, 18);
-        cmbInterpreterEngine.Location = new Point(18, 54);
-        cmbInterpreterEngine.Size = new Size(245, 30);
-        cmbInterpreterEngine.BringToFront();
-        lblEngineTitle.BringToFront();
-        return card;
-    }
-
-    private Control BuildAudioCard()
-    {
-        var card = CreateCard();
-        _lblAudioDevicesSection = CreateCardTitle("THIẾT BỊ ÂM THANH");
-        card.Controls.Add(_lblAudioDevicesSection);
-
-        var grid = new TableLayoutPanel
-        {
-            Location = new Point(18, 48),
-            Size = new Size(card.Width - 36, 180),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-            ColumnCount = 1,
-            RowCount = 3
-        };
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-        card.Controls.Add(grid);
-
-        _lblInputMicrophone = new Label();
-        _lblOutput1 = new Label();
-        _lblOutput2 = new Label();
-        _lblInputStatus = new Label();
-        _lblOutput1Status = new Label();
-        _lblOutput2Status = new Label();
-        grid.Controls.Add(CreateDeviceRow(_lblInputMicrophone, "Microphone phòng họp", cmbInputDevice, btnRefreshDevices, _lblInputStatus, "Đã kết nối"), 0, 0);
-        grid.Controls.Add(CreateDeviceRow(_lblOutput1, "Loa phòng họp", cmbOutput1Device, btnTestOutput1, _lblOutput1Status, "Phát bản dịch tiếng Việt"), 0, 1);
-        grid.Controls.Add(CreateDeviceRow(_lblOutput2, "Tai nghe quản lý", cmbOutput2Device, btnTestOutput2, _lblOutput2Status, "Phát bản dịch tiếng Hàn"), 0, 2);
-        return card;
-    }
-
-    private Control BuildStatusCard()
-    {
-        var card = CreateCard();
-        _lblSessionControlsSection = CreateCardTitle("TRẠNG THÁI");
-        card.Controls.Add(_lblSessionControlsSection);
+        _mainLayout.Controls.Add(bar, 0, 1);
 
         lblState.Font = UiTheme.StatusFont;
-        lblState.ForeColor = UiTheme.Success;
-        lblState.Text = "● Sẵn sàng";
-        lblState.Location = new Point(18, 48);
-        lblState.Size = new Size(260, 32);
+        lblState.ForeColor = UiTheme.Warning;
+        lblState.Text = "Cần cấu hình";
+        lblState.Location = new Point(20, 15);
+        lblState.Size = new Size(310, 30);
         lblState.TextAlign = ContentAlignment.MiddleLeft;
-        card.Controls.Add(lblState);
+        bar.Controls.Add(lblState);
 
         lblStatus.Font = UiTheme.BodyFont;
         lblStatus.ForeColor = UiTheme.TextSecondary;
-        lblStatus.Location = new Point(20, 80);
-        lblStatus.Size = new Size(310, 38);
-        lblStatus.Text = "Chọn thiết bị và nhấn Bắt đầu.";
-        card.Controls.Add(lblStatus);
+        lblStatus.Location = new Point(22, 47);
+        lblStatus.Size = new Size(700, 24);
+        lblStatus.AutoEllipsis = true;
+        bar.Controls.Add(lblStatus);
+
+        _lblHeaderStatus = new Label
+        {
+            Text = "✓ Cần cấu hình",
+            Font = UiTheme.StrongBodyFont,
+            ForeColor = UiTheme.Warning,
+            TextAlign = ContentAlignment.MiddleRight,
+            Visible = false
+        };
+        bar.Controls.Add(_lblHeaderStatus);
 
         UiTheme.StylePrimaryButton(btnStart);
         UiTheme.StylePrimaryButton(btnStop);
-        btnStart.Text = "BẮT ĐẦU PHIÊN DỊCH";
-        btnStop.Text = "DỪNG PHIÊN DỊCH";
-        btnStart.Location = new Point(18, 124);
-        btnStop.Location = btnStart.Location;
-        btnStart.Size = new Size(294, 46);
+        btnStart.Text = "BẮT ĐẦU";
+        btnStop.Text = "DỪNG";
+        btnStart.Size = new Size(210, 50);
         btnStop.Size = btnStart.Size;
         btnStop.Visible = false;
-        card.Controls.Add(btnStart);
-        card.Controls.Add(btnStop);
-
-        _lblMicLevelSection = new Label
+        btnStart.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        btnStop.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        bar.Controls.Add(btnStart);
+        bar.Controls.Add(btnStop);
+        bar.Resize += (_, _) =>
         {
-            AutoSize = true,
-            Text = "Mức Microphone",
-            Font = UiTheme.StrongBodyFont,
-            ForeColor = UiTheme.TextPrimary,
-            Location = new Point(18, 174)
+            var x = Math.Max(740, bar.ClientSize.Width - btnStart.Width - 20);
+            btnStart.Location = new Point(x, 15);
+            btnStop.Location = btnStart.Location;
+            lblStatus.Width = Math.Max(320, x - 42);
         };
-        card.Controls.Add(_lblMicLevelSection);
-
-        lblMicLevel.Font = UiTheme.BodyFont;
-        lblMicLevel.ForeColor = UiTheme.TextSecondary;
-        lblMicLevel.Location = new Point(18, 197);
-        lblMicLevel.Size = new Size(120, 22);
-        card.Controls.Add(lblMicLevel);
-
-        prgMicLevel.Location = new Point(142, 198);
-        prgMicLevel.Size = new Size(170, 16);
-        card.Controls.Add(prgMicLevel);
-
-        lblMicQuality.Font = UiTheme.BodyFont;
-        lblMicQuality.ForeColor = UiTheme.Neutral;
-        lblMicQuality.Location = new Point(18, 220);
-        lblMicQuality.Size = new Size(220, 22);
-        card.Controls.Add(lblMicQuality);
-
-        _lblQueueStatus = new Label
-        {
-            Text = "Đang chờ: 0 câu",
-            Font = UiTheme.BodyFont,
-            ForeColor = UiTheme.TextSecondary,
-            Location = new Point(18, 246),
-            Size = new Size(260, 22)
-        };
-        card.Controls.Add(_lblQueueStatus);
-
-        return card;
     }
 
-    private void BuildCurrentTranslationCard()
+    private void BuildCurrentTranslationSurface()
     {
-        var card = CreateCard();
-        _mainLayout.Controls.Add(card, 0, 2);
+        var surface = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = UiTheme.CardBackground,
+            Margin = new Padding(0, 0, 0, 12),
+            Padding = new Padding(20, 14, 20, 12)
+        };
+        _mainLayout.Controls.Add(surface, 0, 2);
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = UiTheme.CardBackground,
+            ColumnCount = 1,
+            RowCount = 3
+        };
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        surface.Controls.Add(layout);
 
         lblCurrentContentTitle.Font = UiTheme.CardTitleFont;
         lblCurrentContentTitle.ForeColor = UiTheme.TextPrimary;
         lblCurrentContentTitle.Text = "NỘI DUNG PHIÊN DỊCH";
-        lblCurrentContentTitle.Location = new Point(18, 16);
-        card.Controls.Add(lblCurrentContentTitle);
+        lblCurrentContentTitle.Dock = DockStyle.Fill;
+        lblCurrentContentTitle.TextAlign = ContentAlignment.MiddleLeft;
+        layout.Controls.Add(lblCurrentContentTitle, 0, 0);
 
-        _lblCurrentSourceTitle = CreateSectionLabel("NỘI DUNG NÓI");
-        _lblCurrentSourceTitle.Location = new Point(18, 52);
-        card.Controls.Add(_lblCurrentSourceTitle);
-
-        _rtbCurrentSource = CreateReadOnlyTranscriptBox();
-        _rtbCurrentSource.Location = new Point(18, 78);
-        _rtbCurrentSource.Size = new Size(540, 80);
-        card.Controls.Add(_rtbCurrentSource);
-
-        var arrow = new Label
+        var transcriptLayout = new TableLayoutPanel
         {
-            Text = "→",
-            Font = new Font("Segoe UI", 18F, FontStyle.Bold),
-            ForeColor = UiTheme.Neutral,
-            TextAlign = ContentAlignment.MiddleCenter,
-            Location = new Point(570, 92),
-            Size = new Size(44, 44)
+            Dock = DockStyle.Fill,
+            BackColor = UiTheme.CardBackground,
+            ColumnCount = 2,
+            RowCount = 1,
+            Padding = new Padding(0)
         };
-        card.Controls.Add(arrow);
+        transcriptLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        transcriptLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        layout.Controls.Add(transcriptLayout, 0, 1);
+        transcriptLayout.Controls.Add(BuildTranscriptColumn(isSource: true), 0, 0);
+        transcriptLayout.Controls.Add(BuildTranscriptColumn(isSource: false), 1, 0);
 
-        _lblCurrentTargetTitle = CreateSectionLabel("NỘI DUNG DỊCH");
-        _lblCurrentTargetTitle.Location = new Point(626, 52);
-        card.Controls.Add(_lblCurrentTargetTitle);
-
-        _rtbCurrentTarget = CreateReadOnlyTranscriptBox();
-        _rtbCurrentTarget.Location = new Point(626, 78);
-        _rtbCurrentTarget.Size = new Size(540, 80);
-        card.Controls.Add(_rtbCurrentTarget);
-
+        var footer = new Panel { Dock = DockStyle.Fill, BackColor = UiTheme.CardBackground };
         _lblCurrentRoute = new Label
         {
-            Text = "Chưa có nội dung phiên dịch. Hệ thống sẽ hiển thị nội dung tại đây khi cuộc họp bắt đầu.",
+            Dock = DockStyle.Fill,
+            Text = "Transcript trực tiếp sẽ xuất hiện tại đây khi bắt đầu.",
             Font = UiTheme.BodyFont,
             ForeColor = UiTheme.TextSecondary,
-            Location = new Point(18, 166),
-            Size = new Size(850, 24)
+            TextAlign = ContentAlignment.MiddleLeft
         };
-        card.Controls.Add(_lblCurrentRoute);
-
         _lblCurrentElapsed = new Label
         {
+            Dock = DockStyle.Right,
+            Width = 130,
             Text = string.Empty,
             Font = UiTheme.StrongBodyFont,
             ForeColor = UiTheme.TextSecondary,
-            TextAlign = ContentAlignment.MiddleRight,
-            Location = new Point(1030, 166),
-            Size = new Size(130, 24)
+            TextAlign = ContentAlignment.MiddleRight
         };
-        card.Controls.Add(_lblCurrentElapsed);
-
+        footer.Controls.Add(_lblCurrentRoute);
+        footer.Controls.Add(_lblCurrentElapsed);
+        layout.Controls.Add(footer, 0, 2);
         txtCurrentContent.Visible = false;
     }
 
-    private void BuildHistoryCard()
+    private Control BuildTranscriptColumn(bool isSource)
     {
-        var card = CreateCard();
-        _mainLayout.Controls.Add(card, 0, 3);
+        var panel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = isSource ? Color.White : Color.FromArgb(247, 250, 254),
+            Padding = isSource ? new Padding(0, 0, 14, 0) : new Padding(14, 0, 0, 0),
+            Margin = new Padding(0)
+        };
+        panel.Controls.Add(new Panel
+        {
+            Dock = isSource ? DockStyle.Right : DockStyle.Left,
+            Width = 1,
+            BackColor = UiTheme.Border
+        });
+        var column = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = panel.BackColor,
+            Padding = new Padding(4, 0, 4, 4)
+        };
+        column.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        column.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        panel.Controls.Add(column);
+        column.BringToFront();
+        var title = CreateSectionLabel(isSource ? "NỘI DUNG NÓI" : "NỘI DUNG DỊCH");
+        title.Dock = DockStyle.Fill;
+        title.TextAlign = ContentAlignment.MiddleLeft;
+        column.Controls.Add(title, 0, 0);
+        var transcript = CreateTranscriptView(panel.BackColor);
+        transcript.Dock = DockStyle.Fill;
+        column.Controls.Add(transcript, 0, 1);
 
+        if (isSource)
+        {
+            _lblCurrentSourceTitle = title;
+            _rtbCurrentSource = transcript;
+        }
+        else
+        {
+            _lblCurrentTargetTitle = title;
+            _rtbCurrentTarget = transcript;
+        }
+        return panel;
+    }
+
+    private void BuildHistorySurface()
+    {
+        var surface = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = UiTheme.CardBackground,
+            Padding = new Padding(20, 10, 20, 14)
+        };
+        _mainLayout.Controls.Add(surface, 0, 3);
         _lblTranslationHistory = CreateCardTitle("LỊCH SỬ PHIÊN DỊCH");
-        _lblTranslationHistory.Location = new Point(18, 16);
-        card.Controls.Add(_lblTranslationHistory);
-
+        _lblTranslationHistory.Location = new Point(20, 14);
+        surface.Controls.Add(_lblTranslationHistory);
         btnExportHistory = new Button
         {
             Text = "Xuất Excel",
@@ -354,94 +310,39 @@ public partial class FormMain
         };
         btnExportHistory.Click += btnExportHistory_Click;
         UiTheme.StyleSecondaryButton(btnExportHistory);
-        card.Controls.Add(btnExportHistory);
-
-        dgvTranslations.Location = new Point(18, 58);
-        dgvTranslations.Size = new Size(1140, 260);
+        surface.Controls.Add(btnExportHistory);
+        dgvTranslations.Location = new Point(20, 52);
         dgvTranslations.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-        card.Controls.Add(dgvTranslations);
-
-        card.Resize += (_, _) =>
+        surface.Controls.Add(dgvTranslations);
+        surface.Resize += (_, _) =>
         {
-            btnExportHistory.Location = new Point(Math.Max(18, card.ClientSize.Width - btnExportHistory.Width - 18), 14);
-            dgvTranslations.Width = Math.Max(300, card.ClientSize.Width - 36);
-            dgvTranslations.Height = Math.Max(160, card.ClientSize.Height - 76);
+            btnExportHistory.Location = new Point(Math.Max(20, surface.ClientSize.Width - btnExportHistory.Width - 20), 8);
+            dgvTranslations.Size = new Size(Math.Max(300, surface.ClientSize.Width - 40), Math.Max(90, surface.ClientSize.Height - 66));
         };
     }
 
-    private Panel CreateDeviceRow(Label label, string title, ComboBox comboBox, Button button, Label statusLabel, string subtitle)
+    private static Label CreateCardTitle(string text) => new()
     {
-        var row = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 3) };
+        AutoSize = true,
+        Text = text,
+        Font = UiTheme.CardTitleFont,
+        ForeColor = UiTheme.TextPrimary
+    };
 
-        label.Text = title;
-        label.Font = UiTheme.StrongBodyFont;
-        label.ForeColor = UiTheme.TextPrimary;
-        label.Location = new Point(0, 0);
-        label.Size = new Size(160, 20);
-        row.Controls.Add(label);
+    private static Label CreateSectionLabel(string text) => new()
+    {
+        AutoSize = false,
+        Text = text,
+        Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+        ForeColor = UiTheme.TextSecondary
+    };
 
-        statusLabel.Text = "● " + subtitle;
-        statusLabel.Font = new Font("Segoe UI", 8.5F);
-        statusLabel.ForeColor = UiTheme.TextSecondary;
-        statusLabel.Location = new Point(164, 1);
-        statusLabel.Size = new Size(280, 19);
-        row.Controls.Add(statusLabel);
-
-        comboBox.Location = new Point(0, 25);
-        comboBox.Size = new Size(360, 30);
-        comboBox.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
-        row.Controls.Add(comboBox);
-
-        button.Location = new Point(370, 24);
-        button.Size = new Size(128, 30);
-        button.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        row.Controls.Add(button);
-
-        row.Resize += (_, _) =>
-        {
-            button.Left = Math.Max(0, row.Width - button.Width);
-            comboBox.Width = Math.Max(180, button.Left - 10);
-        };
-
-        return row;
-    }
-
-    private static CardPanel CreateCard()
-        => new()
-        {
-            Dock = DockStyle.Fill,
-            Margin = new Padding(0, 0, 16, 0)
-        };
-
-    private static Label CreateCardTitle(string text)
-        => new()
-        {
-            AutoSize = true,
-            Text = text,
-            Font = UiTheme.CardTitleFont,
-            ForeColor = UiTheme.TextPrimary
-        };
-
-    private static Label CreateSectionLabel(string text)
-        => new()
-        {
-            AutoSize = true,
-            Text = text,
-            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
-            ForeColor = UiTheme.TextSecondary
-        };
-
-    private static RichTextBox CreateReadOnlyTranscriptBox()
-        => new()
-        {
-            ReadOnly = true,
-            BorderStyle = BorderStyle.None,
-            BackColor = UiTheme.CardBackground,
-            ForeColor = UiTheme.TextPrimary,
-            Font = new Font("Segoe UI", 12F),
-            DetectUrls = false,
-            ScrollBars = RichTextBoxScrollBars.Vertical
-        };
+    private static TranscriptView CreateTranscriptView(Color background) => new()
+    {
+        BackColor = background,
+        ForeColor = UiTheme.TextPrimary,
+        Font = new Font("Segoe UI", 18F, FontStyle.Regular)
+    };
 
     private void ApplyCommonControlStyle()
     {
@@ -449,16 +350,7 @@ public partial class FormMain
         {
             UiTheme.StyleCombo(combo);
         }
-
-        foreach (var button in new[] { btnRefreshDevices, btnTestOutput1, btnTestOutput2, btnBrowseCredential, btnTestGemini })
-        {
-            UiTheme.StyleSecondaryButton(button);
-        }
-
-        _toolTip.SetToolTip(btnRefreshDevices, "Làm mới danh sách thiết bị âm thanh");
-        _toolTip.SetToolTip(btnTestOutput1, "Phát thử âm thanh qua loa phòng họp");
-        _toolTip.SetToolTip(btnTestOutput2, "Phát thử âm thanh qua tai nghe quản lý");
-        _toolTip.SetToolTip(cmbInterpreterEngine, "Chọn engine phiên dịch đang dùng cho phiên họp");
+        _toolTip.SetToolTip(btnSettings, "Mở cài đặt mô hình, kết nối và thiết bị âm thanh");
     }
 
     private void ApplyModernUiLanguage()
@@ -469,37 +361,21 @@ public partial class FormMain
         }
 
         Text = T("Phiên dịch cuộc họp Việt - Hàn", "Vietnamese - Korean Meeting Interpreter", "베트남어 - 한국어 회의 통역");
-        _lblHeaderTitle.Text = T("Phiên dịch cuộc họp Việt - Hàn", "Vietnamese - Korean Meeting Interpreter", "베트남어 - 한국어 회의 통역");
-        _lblHeaderSubtitle.Text = T("Phiên dịch 2 chiều thời gian thực", "Real-time two-way interpretation", "실시간 양방향 통역");
-        lblEngineTitle.Text = T("MÔ HÌNH PHIÊN DỊCH", "INTERPRETER ENGINE", "통역 엔진");
-        _lblAudioDevicesSection!.Text = T("THIẾT BỊ ÂM THANH", "AUDIO DEVICES", "오디오 장치");
-        _lblInputMicrophone!.Text = T("Microphone phòng họp", "Meeting room microphone", "회의실 마이크");
-        _lblOutput1!.Text = T("Loa phòng họp", "Room speaker", "회의실 스피커");
-        _lblOutput2!.Text = T("Tai nghe quản lý", "Manager headset", "관리자 헤드셋");
-        _lblInputStatus.Text = T("● Đã kết nối", "● Connected", "● 연결됨");
-        _lblOutput1Status.Text = T("● Phát bản dịch tiếng Việt", "● Plays Vietnamese translation", "● 베트남어 번역 재생");
-        _lblOutput2Status.Text = T("● Phát bản dịch tiếng Hàn", "● Plays Korean translation", "● 한국어 번역 재생");
-        _lblSessionControlsSection!.Text = T("TRẠNG THÁI", "STATUS", "상태");
-        _lblMicLevelSection!.Text = T("Mức Microphone", "Microphone level", "마이크 레벨");
-        _lblQueueStatus.Text = T("Đang chờ: 0 câu", "Pending: 0", "대기: 0");
-        lblCurrentContentTitle.Text = T("NỘI DUNG PHIÊN DỊCH", "CURRENT TRANSLATION", "현재 통역");
+        _lblHeaderTitle.Text = Text;
+        _lblHeaderSubtitle.Text = T("Phiên dịch hai chiều theo thời gian thực", "Real-time two-way interpretation", "실시간 양방향 통역");
+        btnSettings.Text = T("Cài đặt", "Settings", "설정");
+        btnStart.Text = T("BẮT ĐẦU", "START", "시작");
+        btnStop.Text = T("DỪNG", "STOP", "중지");
+        lblCurrentContentTitle.Text = T("NỘI DUNG PHIÊN DỊCH", "LIVE INTERPRETATION", "실시간 통역");
         _lblCurrentSourceTitle.Text = T("NỘI DUNG NÓI", "SPOKEN CONTENT", "말한 내용");
         _lblCurrentTargetTitle.Text = T("NỘI DUNG DỊCH", "TRANSLATED CONTENT", "번역 내용");
-        if (string.IsNullOrWhiteSpace(_rtbCurrentSource.Text) && string.IsNullOrWhiteSpace(_rtbCurrentTarget.Text))
-        {
-            _lblCurrentRoute.Text = T(
-                "Chưa có nội dung phiên dịch. Hệ thống sẽ hiển thị nội dung tại đây khi cuộc họp bắt đầu.",
-                "No interpretation content yet. Content will appear here when the meeting starts.",
-                "아직 통역 내용이 없습니다. 회의가 시작되면 여기에 표시됩니다.");
-        }
-
         _lblTranslationHistory!.Text = T("LỊCH SỬ PHIÊN DỊCH", "TRANSLATION HISTORY", "통역 기록");
         btnExportHistory.Text = T("Xuất Excel", "Export Excel", "Excel 내보내기");
-        _toolTip.SetToolTip(btnSettings, T("Mở cài đặt kết nối, nhận dạng và âm thanh nâng cao", "Open connection, recognition, and advanced audio settings", "연결, 인식 및 고급 오디오 설정 열기"));
-        _toolTip.SetToolTip(btnRefreshDevices, T("Làm mới danh sách thiết bị âm thanh", "Refresh audio device list", "오디오 장치 목록 새로 고침"));
-        _toolTip.SetToolTip(btnTestOutput1, T("Phát thử âm thanh qua loa phòng họp", "Test audio through the room speaker", "회의실 스피커로 테스트 재생"));
-        _toolTip.SetToolTip(btnTestOutput2, T("Phát thử âm thanh qua tai nghe quản lý", "Test audio through the manager headset", "관리자 헤드셋으로 테스트 재생"));
-        _toolTip.SetToolTip(cmbInterpreterEngine, T("Chọn engine phiên dịch đang dùng cho phiên họp", "Choose the interpreter engine for this meeting", "회의에 사용할 통역 엔진 선택"));
+        _toolTip.SetToolTip(btnSettings, T("Mở cài đặt mô hình, kết nối và thiết bị âm thanh", "Open engine, connection, and audio settings", "엔진, 연결 및 오디오 설정 열기"));
+        if (_sourceTranscriptHistory.Length == 0 && string.IsNullOrWhiteSpace(_liveSourcePreview))
+        {
+            _lblCurrentRoute.Text = T("Transcript trực tiếp sẽ xuất hiện tại đây khi bắt đầu.", "Live transcript will appear here after you start.", "시작하면 실시간 자막이 여기에 표시됩니다.");
+        }
     }
 
     private void HideAdvancedMainControls()
@@ -510,25 +386,38 @@ public partial class FormMain
         _lblDisplayLanguage = new Label { Visible = false };
         _lblVadSection = new Label { Visible = false };
         _lblSilenceDuration = new Label { Visible = false };
+        _lblAudioDevicesSection = new Label { Visible = false };
+        _lblInputMicrophone = new Label { Visible = false };
+        _lblOutput1 = new Label { Visible = false };
+        _lblOutput2 = new Label { Visible = false };
+        _lblSessionControlsSection = new Label { Visible = false };
+        _lblMicLevelSection = new Label { Visible = false };
+        _lblInputStatus = new Label { Visible = false };
+        _lblOutput1Status = new Label { Visible = false };
+        _lblOutput2Status = new Label { Visible = false };
+        _lblQueueStatus = new Label { Visible = false };
 
-        txtGoogleCredentialPath.Visible = false;
-        btnBrowseCredential.Visible = false;
-        lblGoogleStatus.Visible = false;
-        cmbDisplayLanguage.Visible = false;
-        trkVadThreshold.Visible = false;
-        lblVadThreshold.Visible = false;
-        nudSilenceDuration.Visible = false;
-        chkSuppressHeadset.Visible = false;
-        chkRecognitionOnly.Visible = false;
-        chkSaveDebugAudio.Visible = false;
-        cmbSpeechModel.Visible = false;
-        lblSpeechModel.Visible = false;
-
+        cmbInterpreterEngine = new ComboBox { Visible = false };
+        cmbInterpreterEngine.SelectedIndexChanged += cmbInterpreterEngine_SelectedIndexChanged;
+        lblEngineTitle = new Label { Visible = false };
+        lblEngineDescription = new Label { Visible = false };
         lblGeminiSection = new Label { Visible = false };
         lblGeminiApiKey = new Label { Visible = false };
         txtGeminiApiKey = new TextBox { UseSystemPasswordChar = true, Visible = false };
         btnTestGemini = new Button { Visible = false };
         lblGeminiStatus = new Label { Visible = false };
+
+        foreach (var control in new Control[]
+        {
+            txtGoogleCredentialPath, btnBrowseCredential, lblGoogleStatus, cmbDisplayLanguage,
+            cmbInputDevice, cmbOutput1Device, cmbOutput2Device, btnRefreshDevices,
+            btnTestOutput1, btnTestOutput2, prgMicLevel, lblMicLevel, lblMicQuality,
+            trkVadThreshold, lblVadThreshold, nudSilenceDuration, chkSuppressHeadset,
+            chkRecognitionOnly, chkSaveDebugAudio, cmbSpeechModel, lblSpeechModel, txtCurrentContent
+        })
+        {
+            control.Visible = false;
+        }
     }
 
     private void ApplyModernResponsiveLayout()
@@ -537,26 +426,62 @@ public partial class FormMain
         {
             return;
         }
+        var horizontalMargin = ClientSize.Width >= 1440 ? 38 : 24;
+        var contentWidth = Math.Min(1540, Math.Max(1020, ClientSize.Width - horizontalMargin * 2));
+        var left = Math.Max(horizontalMargin, (ClientSize.Width - contentWidth) / 2);
+        _mainContent.SetBounds(left, 14, contentWidth, Math.Max(660, ClientSize.Height - 28));
+    }
 
-        var contentWidth = Math.Min(1380, Math.Max(1020, ClientSize.Width - 48));
-        var left = Math.Max(24, (ClientSize.Width - contentWidth) / 2);
-        _mainContent.SetBounds(left, 18, contentWidth, Math.Max(640, ClientSize.Height - 36));
-
-        if (_rtbCurrentSource is not null && _rtbCurrentTarget is not null)
+    private void ConfigureAdvancedRealtimePreviewRendering()
+    {
+        _advancedRealtimePreviewTimer = new System.Windows.Forms.Timer(components)
         {
-            var cardWidth = _rtbCurrentSource.Parent?.ClientSize.Width ?? contentWidth;
-            var gap = 68;
-            var columnWidth = Math.Max(280, (cardWidth - 36 - gap) / 2);
-            _rtbCurrentSource.Width = columnWidth;
-            _rtbCurrentTarget.Left = 18 + columnWidth + gap;
-            _rtbCurrentTarget.Width = columnWidth;
-            _lblCurrentTargetTitle.Left = _rtbCurrentTarget.Left;
-            _lblCurrentElapsed.Left = Math.Max(18, cardWidth - _lblCurrentElapsed.Width - 18);
-            _lblCurrentRoute.Width = Math.Max(300, _lblCurrentElapsed.Left - 28);
+            Interval = 40
+        };
+        _advancedRealtimePreviewTimer.Tick += (_, _) => RenderLatestAdvancedRealtimePreview();
+        _advancedRealtimePreviewTimer.Start();
+    }
+
+    private void QueueAdvancedRealtimePreview(InterpreterContentPreviewEventArgs args)
+    {
+        lock (_advancedRealtimePreviewSyncRoot)
+        {
+            _latestAdvancedRealtimePreview = args;
         }
     }
 
-    private void UpdateCurrentPreview(string title, string content)
+    private void RenderLatestAdvancedRealtimePreview()
+    {
+        InterpreterContentPreviewEventArgs? latest;
+        lock (_advancedRealtimePreviewSyncRoot)
+        {
+            latest = _latestAdvancedRealtimePreview;
+            _latestAdvancedRealtimePreview = null;
+        }
+
+        if (latest is not null)
+        {
+            ApplyContentPreview(latest);
+        }
+    }
+
+    private void ClearAdvancedRealtimePreviewQueue()
+    {
+        lock (_advancedRealtimePreviewSyncRoot)
+        {
+            _latestAdvancedRealtimePreview = null;
+        }
+    }
+
+    private void ApplyContentPreview(InterpreterContentPreviewEventArgs args)
+    {
+        var title = args.IsTranslation
+            ? T("Nội dung dịch", "Translated text", "번역 내용")
+            : T("Nội dung nói", "Spoken content", "말한 내용");
+        UpdateCurrentPreview(title, args.Content, args.IsTranslation, args.Language, args.IsInterim);
+    }
+
+    private void UpdateCurrentPreview(string title, string content, bool isTranslation, SupportedLanguage language, bool isInterim)
     {
         if (_rtbCurrentSource is null || _rtbCurrentTarget is null)
         {
@@ -564,33 +489,246 @@ public partial class FormMain
             return;
         }
 
-        if (title.Contains("dịch", StringComparison.OrdinalIgnoreCase)
-            || title.Contains("Translated", StringComparison.OrdinalIgnoreCase))
+        var normalized = content.Trim();
+        if (isTranslation)
         {
-            _lblCurrentTargetTitle.Text = T("NỘI DUNG DỊCH", "TRANSLATED CONTENT", "번역 내용");
-            _rtbCurrentTarget.Text = content;
+            _liveTargetPreview = PreferMoreCompletePreview(_liveTargetPreview, normalized);
         }
         else
         {
-            _lblCurrentSourceTitle.Text = T("NỘI DUNG NÓI", "SPOKEN CONTENT", "말한 내용");
-            _rtbCurrentSource.Text = content;
-            _rtbCurrentTarget.Clear();
-            _lblCurrentElapsed.Text = string.Empty;
+            if (_liveSourceLanguage != SupportedLanguage.Unknown && language != SupportedLanguage.Unknown && _liveSourceLanguage != language)
+            {
+                _liveSourcePreview = string.Empty;
+            }
+
+            if (DateTime.UtcNow - _lastCommittedSourceAtUtc <= TimeSpan.FromSeconds(8)
+                && (_lastCommittedSourceLanguage == SupportedLanguage.Unknown
+                    || language == SupportedLanguage.Unknown
+                    || _lastCommittedSourceLanguage == language)
+                && AreTranscriptVersionsRelated(_lastCommittedSourceText, normalized))
+            {
+                if (_settings.EngineType is not (InterpreterEngineType.GoogleCloudAdvancedHybridPipeline
+                        or InterpreterEngineType.GoogleCloudAdaptiveHybridPipeline
+                        or InterpreterEngineType.GoogleCloudPhysicalMuteHybridPipeline)
+                    && CountWords(normalized) > CountWords(_lastCommittedSourceText))
+                {
+                    ReplaceLastTranscriptEntry(_sourceTranscriptHistory, _lastCommittedSourceText, normalized);
+                    _lastCommittedSourceText = normalized;
+                    RenderTranscriptPanels();
+                }
+                return;
+            }
+
+            _liveSourceLanguage = language;
+            _liveSourcePreview = PreferMoreCompletePreview(_liveSourcePreview, normalized);
+            if (language != SupportedLanguage.Unknown)
+            {
+                _lblCurrentSourceTitle.Text = GetLanguageDisplayName(language).ToUpperInvariant();
+            }
         }
 
-        _lblCurrentRoute.Text = T("Đang xử lý nội dung phiên dịch...", "Processing interpretation content...", "통역 내용을 처리 중입니다...");
-        txtCurrentContent.Text = content;
+        RenderTranscriptPanels();
+        _lblCurrentRoute.Text = isInterim
+            ? T("Đang nghe và cập nhật transcript...", "Listening and updating transcript...", "듣고 자막을 업데이트하는 중...")
+            : T("Đang xử lý nội dung phiên dịch...", "Processing interpretation...", "통역 내용을 처리하는 중...");
+        txtCurrentContent.Text = normalized;
     }
 
-    private void ShowCurrentCellValue(string title, string content)
+    private string CommitTranslationToTranscript(TranslationResult result)
     {
-        _lblCurrentSourceTitle.Text = title.ToUpperInvariant();
-        _rtbCurrentSource.Text = content;
-        _lblCurrentTargetTitle.Text = T("NỘI DUNG ĐẦY ĐỦ", "FULL CONTENT", "전체 내용");
-        _rtbCurrentTarget.Clear();
-        _lblCurrentRoute.Text = T("Đang xem nội dung từ lịch sử phiên dịch.", "Viewing content from translation history.", "통역 기록의 내용을 보는 중입니다.");
-        _lblCurrentElapsed.Text = string.Empty;
-        txtCurrentContent.Text = content;
+        var displayOriginal = result.OriginalText.Trim();
+        var sourcePreviewBelongsToResult = AreTranscriptVersionsRelated(displayOriginal, _liveSourcePreview);
+
+        AppendTranscript(_sourceTranscriptHistory, displayOriginal);
+        AppendTranscript(_targetTranscriptHistory, result.TranslatedText);
+        _lastCommittedSourceText = displayOriginal;
+        _lastCommittedSourceAtUtc = DateTime.UtcNow;
+        _lastCommittedSourceLanguage = result.SourceLanguage;
+        if (sourcePreviewBelongsToResult)
+        {
+            _liveSourcePreview = string.Empty;
+            _liveSourceLanguage = SupportedLanguage.Unknown;
+        }
+
+        if (IsSameSentenceProgress(result.TranslatedText, _liveTargetPreview))
+        {
+            _liveTargetPreview = string.Empty;
+        }
+        _lblCurrentSourceTitle.Text = GetLanguageDisplayName(result.SourceLanguage).ToUpperInvariant();
+        _lblCurrentTargetTitle.Text = GetLanguageDisplayName(result.TargetLanguage).ToUpperInvariant();
+        RenderTranscriptPanels();
+        return displayOriginal;
+    }
+
+    private static string PreferMoreCompletePreview(string current, string incoming)
+    {
+        if (string.IsNullOrWhiteSpace(current) || string.IsNullOrWhiteSpace(incoming))
+        {
+            return incoming;
+        }
+
+        return IsSameSentenceProgress(current, incoming)
+            && CountWords(current) > CountWords(incoming)
+                ? current
+                : incoming;
+    }
+
+    private static bool IsSameSentenceProgress(string first, string second)
+    {
+        var firstWords = NormalizeTranscriptWords(first);
+        var secondWords = NormalizeTranscriptWords(second);
+        if (firstWords.Length == 0 || secondWords.Length == 0)
+        {
+            return false;
+        }
+
+        var shorterLength = Math.Min(firstWords.Length, secondWords.Length);
+        var longerLength = Math.Max(firstWords.Length, secondWords.Length);
+        if (longerLength - shorterLength > 8)
+        {
+            return false;
+        }
+
+        var anchorLength = Math.Min(2, shorterLength);
+        for (var index = 0; index < anchorLength; index++)
+        {
+            if (!string.Equals(firstWords[index], secondWords[index], StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        if (shorterLength <= 3)
+        {
+            return firstWords.Take(shorterLength).SequenceEqual(secondWords.Take(shorterLength));
+        }
+
+        var commonWordCount = GetLongestCommonSubsequenceLength(firstWords, secondWords);
+        return commonWordCount >= Math.Max(3, (int)Math.Ceiling(shorterLength * 0.7));
+    }
+
+    private static bool AreTranscriptVersionsRelated(string first, string second)
+    {
+        var firstWords = NormalizeTranscriptWords(first);
+        var secondWords = NormalizeTranscriptWords(second);
+        if (firstWords.Length == 0 || secondWords.Length == 0)
+        {
+            return false;
+        }
+
+        var shorter = firstWords.Length <= secondWords.Length ? firstWords : secondWords;
+        var longer = firstWords.Length <= secondWords.Length ? secondWords : firstWords;
+        if (shorter.Length <= 3)
+        {
+            return shorter.SequenceEqual(longer.Take(shorter.Length));
+        }
+
+        var commonWordCount = GetLongestCommonSubsequenceLength(firstWords, secondWords);
+        var sameOpening = firstWords.Take(2).SequenceEqual(secondWords.Take(2));
+        var shorterIsContained = commonWordCount == shorter.Length;
+        return (sameOpening || shorterIsContained)
+            && commonWordCount >= Math.Max(3, (int)Math.Ceiling(shorter.Length * 0.7));
+    }
+
+    private static int GetLongestCommonSubsequenceLength(string[] first, string[] second)
+    {
+        var previous = new int[second.Length + 1];
+        var current = new int[second.Length + 1];
+        for (var firstIndex = 1; firstIndex <= first.Length; firstIndex++)
+        {
+            for (var secondIndex = 1; secondIndex <= second.Length; secondIndex++)
+            {
+                current[secondIndex] = string.Equals(first[firstIndex - 1], second[secondIndex - 1], StringComparison.Ordinal)
+                    ? previous[secondIndex - 1] + 1
+                    : Math.Max(previous[secondIndex], current[secondIndex - 1]);
+            }
+
+            (previous, current) = (current, previous);
+            Array.Clear(current);
+        }
+        return previous[second.Length];
+    }
+
+    private static string[] NormalizeTranscriptWords(string text)
+    {
+        var normalized = new StringBuilder(text.Length);
+        foreach (var character in text.Normalize(NormalizationForm.FormC).ToLowerInvariant())
+        {
+            normalized.Append(char.IsLetterOrDigit(character) ? character : ' ');
+        }
+
+        return normalized
+            .ToString()
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
+    private static int CountWords(string text) => NormalizeTranscriptWords(text).Length;
+
+    private static void ReplaceLastTranscriptEntry(StringBuilder history, string previousText, string replacementText)
+    {
+        if (string.IsNullOrWhiteSpace(previousText)
+            || history.Length < previousText.Length
+            || !history.ToString().EndsWith(previousText, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        history.Remove(history.Length - previousText.Length, previousText.Length);
+        history.Append(replacementText.Trim());
+    }
+
+    private static void AppendTranscript(StringBuilder history, string text)
+    {
+        var normalized = text.Trim();
+        if (normalized.Length == 0)
+        {
+            return;
+        }
+        if (history.Length > 0)
+        {
+            history.AppendLine();
+            history.AppendLine();
+        }
+        history.Append(normalized);
+        if (history.Length > MaximumTranscriptCharacters)
+        {
+            var removeLength = history.Length - MaximumTranscriptCharacters;
+            var nextBreak = history.ToString().IndexOf('\n', removeLength);
+            history.Remove(0, nextBreak >= 0 ? nextBreak + 1 : removeLength);
+        }
+    }
+
+    private void RenderTranscriptPanels()
+    {
+        SetTranscriptText(_rtbCurrentSource, ComposeTranscript(_sourceTranscriptHistory, _liveSourcePreview));
+        SetTranscriptText(_rtbCurrentTarget, ComposeTranscript(_targetTranscriptHistory, _liveTargetPreview));
+    }
+
+    private static string ComposeTranscript(StringBuilder history, string liveText)
+    {
+        if (history.Length == 0)
+        {
+            return liveText;
+        }
+        return string.IsNullOrWhiteSpace(liveText) ? history.ToString() : history + Environment.NewLine + Environment.NewLine + liveText;
+    }
+
+    private static void SetTranscriptText(TranscriptView box, string text) => box.SetContent(text);
+
+    private void ShowTranslationHistoryRow(
+        string sourceTitle,
+        string originalText,
+        string targetTitle,
+        string translatedText,
+        string elapsed)
+    {
+        _lblCurrentSourceTitle.Text = sourceTitle.ToUpperInvariant();
+        _lblCurrentTargetTitle.Text = targetTitle.ToUpperInvariant();
+        SetTranscriptText(_rtbCurrentSource, originalText);
+        SetTranscriptText(_rtbCurrentTarget, translatedText);
+        _lblCurrentRoute.Text = T("Đang xem nội dung từ lịch sử phiên dịch.", "Viewing translation history.", "통역 기록의 내용을 보고 있습니다.");
+        _lblCurrentElapsed.Text = elapsed;
+        txtCurrentContent.Text = originalText;
     }
 
     private void UpdateStateVisual(InterpreterState state)
@@ -599,7 +737,6 @@ public partial class FormMain
         {
             return;
         }
-
         var color = state switch
         {
             InterpreterState.Error => UiTheme.Error,
@@ -609,10 +746,11 @@ public partial class FormMain
             InterpreterState.Playing => UiTheme.Primary,
             _ => UiTheme.Neutral
         };
-
         lblState.ForeColor = color;
+        var cleanState = GetStateDisplayName(state).Replace("● ", string.Empty).Replace("✓ ", string.Empty);
+        lblState.Text = (color == UiTheme.Success ? "✓ " : "● ") + cleanState;
         _lblHeaderStatus.ForeColor = color;
-        _lblHeaderStatus.Text = "● " + GetStateDisplayName(state).Replace("● ", string.Empty);
+        _lblHeaderStatus.Text = lblState.Text;
     }
 
     private void SetDashboardStatus(string stateText, string detailText, Color color)
@@ -621,17 +759,15 @@ public partial class FormMain
         {
             return;
         }
-
-        var text = "● " + stateText.Replace("● ", string.Empty).Replace("â— ", string.Empty);
-        lblState.Text = text;
+        var cleanState = stateText.Replace("● ", string.Empty).Replace("✓ ", string.Empty);
+        lblState.Text = (color == UiTheme.Success ? "✓ " : "● ") + cleanState;
         lblState.ForeColor = color;
         lblStatus.Text = detailText;
-        _lblHeaderStatus.Text = text;
+        _lblHeaderStatus.Text = "✓ " + cleanState;
         _lblHeaderStatus.ForeColor = color;
     }
 
-    private static string FormatSeconds(double milliseconds)
-        => $"{milliseconds / 1000.0:0.00} giây";
+    private static string FormatSeconds(double milliseconds) => $"{milliseconds / 1000.0:0.00} giây";
 
     private void SyncAdvancedControlsFromSettings()
     {
@@ -641,7 +777,6 @@ public partial class FormMain
         chkRecognitionOnly.Checked = _settings.RecognitionOnlyMode;
         chkSaveDebugAudio.Checked = _settings.SpeechRecognition.SaveRecognitionAudioForDebug;
         cmbSpeechModel.SelectedItem = _settings.SpeechRecognition.Model;
-
         foreach (var item in cmbDisplayLanguage.Items.OfType<DisplayLanguageSelectionItem>())
         {
             if (item.Language == _displayLanguage)
@@ -650,7 +785,6 @@ public partial class FormMain
                 break;
             }
         }
-
         UpdateSettingsLabels();
     }
 }

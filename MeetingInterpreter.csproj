@@ -23,9 +23,13 @@
 
   <ItemGroup>
     <Compile Remove="MeetingInterpreter.Updater\**\*.cs" />
+    <Compile Remove="Tests\**\*.cs" />
     <None Remove="MeetingInterpreter.Updater\**\*" />
+    <None Remove="Tests\**\*" />
     <Content Remove="MeetingInterpreter.Updater\**\*" />
+    <Content Remove="Tests\**\*" />
     <EmbeddedResource Remove="MeetingInterpreter.Updater\**\*" />
+    <EmbeddedResource Remove="Tests\**\*" />
   </ItemGroup>
 
   <Target Name="CopyUpdaterForRun" AfterTargets="Build" Condition="'$(BuildingUpdaterForRun)' != 'true'">

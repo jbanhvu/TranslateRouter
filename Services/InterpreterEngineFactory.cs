@@ -18,14 +18,20 @@ public sealed class InterpreterEngineFactory
             [InterpreterEngineType.Gemini25Pro] = geminiEngine,
             [InterpreterEngineType.GoogleCloudPipeline] = googleCloudEngine,
             [InterpreterEngineType.GoogleCloudHybridPipeline] = googleCloudEngine,
-            [InterpreterEngineType.GoogleCloudStreamingPipeline] = googleCloudEngine
+            [InterpreterEngineType.GoogleCloudStreamingPipeline] = googleCloudEngine,
+            [InterpreterEngineType.GoogleCloudAdvancedHybridPipeline] = googleCloudEngine,
+            [InterpreterEngineType.GoogleCloudAdaptiveHybridPipeline] = googleCloudEngine,
+            [InterpreterEngineType.GoogleCloudPhysicalMuteHybridPipeline] = googleCloudEngine
         };
         _speechSynthesisServices = new Dictionary<InterpreterEngineType, ISpeechSynthesisService>
         {
             [InterpreterEngineType.Gemini25Pro] = geminiSpeechSynthesis,
             [InterpreterEngineType.GoogleCloudPipeline] = googleCloudSpeechSynthesis,
             [InterpreterEngineType.GoogleCloudHybridPipeline] = googleCloudSpeechSynthesis,
-            [InterpreterEngineType.GoogleCloudStreamingPipeline] = googleCloudSpeechSynthesis
+            [InterpreterEngineType.GoogleCloudStreamingPipeline] = googleCloudSpeechSynthesis,
+            [InterpreterEngineType.GoogleCloudAdvancedHybridPipeline] = googleCloudSpeechSynthesis,
+            [InterpreterEngineType.GoogleCloudAdaptiveHybridPipeline] = googleCloudSpeechSynthesis,
+            [InterpreterEngineType.GoogleCloudPhysicalMuteHybridPipeline] = googleCloudSpeechSynthesis
         };
     }
 

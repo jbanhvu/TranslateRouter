@@ -13,4 +13,8 @@ public sealed class TranscriptUtterance
     public SupportedLanguage TargetLanguage { get; init; }
 
     public float? Confidence { get; init; }
+
+    public double RecognitionMilliseconds { get; init; }
+
+    public double QueueWaitMilliseconds { get; init; }
 }

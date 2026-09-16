@@ -5,5 +5,8 @@ public enum InterpreterEngineType
     Gemini25Pro,
     GoogleCloudPipeline,
     GoogleCloudHybridPipeline,
-    GoogleCloudStreamingPipeline
+    GoogleCloudStreamingPipeline,
+    GoogleCloudAdvancedHybridPipeline,
+    GoogleCloudAdaptiveHybridPipeline,
+    GoogleCloudPhysicalMuteHybridPipeline
 }

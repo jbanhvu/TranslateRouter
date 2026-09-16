@@ -18,6 +18,7 @@ public sealed class GoogleStreamingSttService : IAsyncDisposable
     private CancellationTokenSource? _sessionCts;
     private Task? _vietnamesePrimarySupervisorTask;
     private Task? _koreanPrimarySupervisorTask;
+    private bool _singleBilingualStream;
 
     public GoogleStreamingSttService(GoogleTranslatePipeline pipeline, AppLogger logger)
     {
@@ -40,7 +41,7 @@ public sealed class GoogleStreamingSttService : IAsyncDisposable
 
     public event EventHandler? AudioQueueOverloaded;
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken, bool singleBilingualStream = false)
     {
         if (IsRunning)
         {
@@ -53,15 +54,18 @@ public sealed class GoogleStreamingSttService : IAsyncDisposable
         }
 
         _sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _singleBilingualStream = singleBilingualStream;
         _vietnamesePrimaryAudioChannel = CreateAudioChannel();
-        _koreanPrimaryAudioChannel = CreateAudioChannel();
+        _koreanPrimaryAudioChannel = singleBilingualStream ? null : CreateAudioChannel();
 
         _vietnamesePrimarySupervisorTask = Task.Run(
             () => RunSupervisorAsync(_vietnamesePrimaryAudioChannel.Reader, SupportedLanguage.Vietnamese, _sessionCts.Token),
             CancellationToken.None);
-        _koreanPrimarySupervisorTask = Task.Run(
-            () => RunSupervisorAsync(_koreanPrimaryAudioChannel.Reader, SupportedLanguage.Korean, _sessionCts.Token),
-            CancellationToken.None);
+        _koreanPrimarySupervisorTask = _koreanPrimaryAudioChannel is null
+            ? null
+            : Task.Run(
+                () => RunSupervisorAsync(_koreanPrimaryAudioChannel.Reader, SupportedLanguage.Korean, _sessionCts.Token),
+                CancellationToken.None);
         await Task.CompletedTask.ConfigureAwait(false);
     }
 
@@ -74,7 +78,8 @@ public sealed class GoogleStreamingSttService : IAsyncDisposable
 
         AddRollingAudio(audioData);
         var acceptedByVietnameseStream = TryWriteAudio(_vietnamesePrimaryAudioChannel, audioData);
-        var acceptedByKoreanStream = TryWriteAudio(_koreanPrimaryAudioChannel, audioData);
+        var acceptedByKoreanStream = _koreanPrimaryAudioChannel is null
+            || TryWriteAudio(_koreanPrimaryAudioChannel, audioData);
         if (!acceptedByVietnameseStream || !acceptedByKoreanStream)
         {
             _logger.Error("[Google Streaming STT] Audio queue dang qua tai.");
@@ -97,6 +102,7 @@ public sealed class GoogleStreamingSttService : IAsyncDisposable
         _koreanPrimarySupervisorTask = null;
         _sessionCts?.Dispose();
         _sessionCts = null;
+        _singleBilingualStream = false;
         lock (_rollingAudioSyncRoot)
         {
             _rollingAudio.Clear();
@@ -265,7 +271,7 @@ public sealed class GoogleStreamingSttService : IAsyncDisposable
             return;
         }
 
-        if (ShouldSkipPrimaryStreamTranscript(primaryLanguage, text))
+        if (!_singleBilingualStream && ShouldSkipPrimaryStreamTranscript(primaryLanguage, text))
         {
             _logger.Info($"[Google Streaming STT] Skip transcript from {primaryLanguage} primary stream because text script does not match. Text={text}");
             return;
@@ -273,7 +279,7 @@ public sealed class GoogleStreamingSttService : IAsyncDisposable
 
         var language = LanguageHelper.ParseLanguage(result.LanguageCode);
         float? confidence = alternative.Confidence > 0 ? alternative.Confidence : null;
-        var args = new StreamingTranscriptEventArgs(text, language, confidence, result.LanguageCode);
+        var args = new StreamingTranscriptEventArgs(text, language, confidence, result.LanguageCode, primaryLanguage);
 
         if (result.IsFinal)
         {

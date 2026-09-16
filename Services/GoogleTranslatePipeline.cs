@@ -72,8 +72,19 @@ public sealed class GoogleTranslatePipeline : ISpeechRecognitionService
         return InitializeAsync(credentialPath, cancellationToken);
     }
 
+    public Task<SpeechRecognitionResultModel?> RecognizeSpeechAsync(
+        byte[] audioData,
+        CancellationToken cancellationToken)
+        => RecognizeSpeechAsync(
+            audioData,
+            SupportedLanguage.Vietnamese,
+            includeAlternativeLanguage: true,
+            cancellationToken: cancellationToken);
+
     public async Task<SpeechRecognitionResultModel?> RecognizeSpeechAsync(
         byte[] audioData,
+        SupportedLanguage primaryLanguage,
+        bool includeAlternativeLanguage,
         CancellationToken cancellationToken)
     {
         EnsureInitialized();
@@ -94,7 +105,9 @@ public sealed class GoogleTranslatePipeline : ISpeechRecognitionService
                 $"utterance-{DateTime.Now:yyyyMMdd-HHmmss-fff}.wav");
         }
 
-        var config = CreateRecognitionConfig();
+        var config = CreateRecognitionConfig(
+            primaryLanguage: primaryLanguage,
+            includeAlternativeLanguage: includeAlternativeLanguage);
 
         var audio = new RecognitionAudio
         {
@@ -163,7 +176,8 @@ public sealed class GoogleTranslatePipeline : ISpeechRecognitionService
 
     public RecognitionConfig CreateRecognitionConfig(
         string? modelOverride = null,
-        SupportedLanguage primaryLanguage = SupportedLanguage.Vietnamese)
+        SupportedLanguage primaryLanguage = SupportedLanguage.Vietnamese,
+        bool includeAlternativeLanguage = true)
     {
         var primaryLanguageCode = LanguageHelper.ToGoogleSpeechCode(primaryLanguage);
         if (string.IsNullOrWhiteSpace(primaryLanguageCode))
@@ -186,7 +200,10 @@ public sealed class GoogleTranslatePipeline : ISpeechRecognitionService
             EnableAutomaticPunctuation = _speechSettings.EnableAutomaticPunctuation,
             MaxAlternatives = Math.Clamp(_speechSettings.MaxAlternatives, 1, 3)
         };
-        config.AlternativeLanguageCodes.Add(LanguageHelper.ToGoogleSpeechCode(alternativeLanguage));
+        if (includeAlternativeLanguage)
+        {
+            config.AlternativeLanguageCodes.Add(LanguageHelper.ToGoogleSpeechCode(alternativeLanguage));
+        }
         AddVocabularyAdaptation(config);
         return config;
     }
