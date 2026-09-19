@@ -543,6 +543,7 @@ public partial class FormMain : Form
                 prgMicLevel.Value = Math.Clamp(level, 0, 100);
                 lblMicLevel.Text = $"Microphone: {level}%";
                 UpdateMicrophoneQuality(level);
+                UpdateDashboardMicrophoneLevel(level, sessionActive: true);
             });
         };
 
@@ -1067,10 +1068,6 @@ public partial class FormMain : Form
             Math.Round(result.SynthesisMilliseconds),
             FormatSeconds(result.TotalMilliseconds),
             status);
-        _lblCurrentRoute.Text = result.TargetLanguage == SupportedLanguage.Korean
-            ? "Đang phát đến tai nghe quản lý"
-            : "Đang phát ra loa phòng họp";
-        _lblCurrentElapsed.Text = FormatSeconds(result.TotalMilliseconds);
     }
 
     private void dgvTranslations_CellClick(object? sender, DataGridViewCellEventArgs e)
@@ -1297,8 +1294,8 @@ public partial class FormMain : Form
         {
             stateText = T("Cần chọn thiết bị", "Select devices", "장치 선택 필요");
             detailText = T(
-                "Chưa chọn đủ microphone, loa phòng họp và tai nghe.",
-                "Select microphone, room speaker, and headset.",
+                "Chưa chọn đủ microphone, loa và tai nghe.",
+                "Select microphone, speaker, and headset.",
                 "마이크, 회의실 스피커, 헤드셋을 선택하세요.");
             return true;
         }
@@ -1325,6 +1322,7 @@ public partial class FormMain : Form
         cmbOutput2Device.Enabled = !isRunning;
         btnSettings.Enabled = !isRunning;
         btnRefreshDevices.Enabled = !isRunning;
+        UpdateDashboardMicrophoneLevel(0, sessionActive: isRunning);
         lblState.Text = isRunning
             ? "● " + GetStateDisplayName(InterpreterState.Listening)
             : "● " + GetStateDisplayName(InterpreterState.Idle);

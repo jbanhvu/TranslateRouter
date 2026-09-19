@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,6 +20,13 @@
   <ItemGroup>
     <Content Include="speech-vocabulary.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Version.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Remove="Assets\AppLogo.png" />
+    <None Remove="Assets\AppIcon.ico" />
+    <EmbeddedResource Include="Assets\AppLogo.png" LogicalName="MeetingInterpreter.Assets.AppLogo.png" />
+    <EmbeddedResource Include="Assets\AppIcon.ico" LogicalName="MeetingInterpreter.Assets.AppIcon.ico" />
   </ItemGroup>
 
   <ItemGroup>
